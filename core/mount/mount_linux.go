@@ -253,6 +253,7 @@ func doPrepareIDMappedOverlay(lowerDirs []string, usernsFd int) (tmpLowerDirs []
 		for _, lowerDir := range tmpLowerDirs {
 			if err := unix.Unmount(lowerDir, 0); err != nil {
 				log.L.WithError(err).Warnf("failed to unmount temp lowerdir %s", lowerDir)
+				return
 			}
 		}
 		if terr := os.RemoveAll(filepath.Clean(filepath.Join(tmpLowerDirs[0], ".."))); terr != nil {
