@@ -211,11 +211,12 @@ func TestDoPrepareIDMappedOverlayCleanups(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name            string
-		lowerDirs       []string
-		tmpDir          string
-		callbackFailure bool
-		success         bool
+		name                       string
+		lowerDirs                  []string
+		tmpDir                     string
+		callbackFailure            bool
+		callbackIntermitentFailure bool
+		success                    bool
 	}{
 		{
 			name:      "mount failure",
@@ -230,6 +231,11 @@ func TestDoPrepareIDMappedOverlayCleanups(t *testing.T) {
 			name:            "cleanup callback failure",
 			callbackFailure: true,
 			success:         true,
+		},
+		{
+			name:                       "cleanup callback short failure",
+			callbackIntermitentFailure: true,
+			success:                    true,
 		},
 		{
 			name:    "all fine",
@@ -267,7 +273,7 @@ func TestDoPrepareIDMappedOverlayCleanups(t *testing.T) {
 				return
 			}
 
-			if !tc.callbackFailure {
+			if !tc.callbackFailure && !tc.callbackIntermitentFailure {
 				cleanup()
 				// Verify that tmpDir is empty
 				assert.NoError(t, os.Remove(tmpDir), "expected temporary directory %s to be removed, but got error", tmpDir)
@@ -290,6 +296,38 @@ func TestDoPrepareIDMappedOverlayCleanups(t *testing.T) {
 				// clean up the tmp directories.
 				assert.NoError(t, busyDh.Close())
 				cleanup()
+			}
+
+			if tc.callbackIntermitentFailure {
+				// Enable the unmount failure in tests detection, so we receive an
+				// event on a channel when it fails.
+				enableDetectUnmountFailureInTests(true)
+				defer enableDetectUnmountFailureInTests(false)
+
+				// We won't be able to umount if there is an open fd to it.
+				busyDh, err := os.Open(retLowerDirs[0])
+				assert.NoError(t, err)
+				defer busyDh.Close() // close even if asserts fails before we close manually below.
+
+				// The cleanup callback will fail until we close the fd.
+				// Let's make it fail for at least the specified duration.
+				go func() {
+					t.Log("Waiting for cleanup callback to fail")
+					// Wait until the unmount failed at least once.
+					<-unmountFailureInTests
+					// Close the fd, so the unmount callback can succeed after a
+					// few tries.
+					busyDh.Close()
+
+					// Disable detection and empty the channel, in case more
+					// events were sent.
+					enableDetectUnmountFailureInTests(false)
+				}()
+
+				cleanup()
+
+				// Verify that tmpDir IS empty (cleanup worked after a few tries).
+				assert.NoError(t, os.Remove(tmpDir), "can't remove directory: %v", tmpDir)
 			}
 
 			// Verify that the lowerDirs were not modified.

@@ -22,11 +22,52 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
+	"testing"
 	"time"
 
 	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 )
+
+var (
+	// These variables are expected to be used only in unit tests.
+	detectUnmountFailureInTests      bool
+	detectUnmountFailureInTestsMutex sync.Mutex
+	unmountFailureInTests            chan struct{} = make(chan struct{})
+)
+
+// hitUnmountFailureInTests is a helper function that can be used in unit tests and needs opt-in
+// with enableDetectUnmountFailureInTests(true).
+// It sends a signal to the unmountFailureInTests channel, which can be used to detect unmount
+// failures during tests reliably.
+// After receiving from the channel, enableDetectUnmountFailureInTests(false) should be called to
+// empty the channel. It's possible the retry will try to send more events.
+func hitUnmountFailureInTests() {
+	if !testing.Testing() {
+		return
+	}
+	detectUnmountFailureInTestsMutex.Lock()
+	defer detectUnmountFailureInTestsMutex.Unlock()
+
+	if !detectUnmountFailureInTests {
+		return
+	}
+
+	fmt.Println("Detected unmount failure in tests, sending signal to channel")
+	unmountFailureInTests <- struct{}{}
+}
+
+func enableDetectUnmountFailureInTests(enabled bool) {
+	detectUnmountFailureInTestsMutex.Lock()
+	defer detectUnmountFailureInTestsMutex.Unlock()
+	detectUnmountFailureInTests = enabled
+
+	// Empty the channel in case one more event was sent.
+	for len(unmountFailureInTests) > 0 {
+		<-unmountFailureInTests
+	}
+}
 
 // UnmountRecursive unmounts the target and all mounts underneath, starting
 // with the deepest mount first.
@@ -85,6 +126,7 @@ func unmount(target string, flags int) error {
 		if err := unix.Unmount(target, flags); err != nil {
 			switch err {
 			case unix.EBUSY:
+				hitUnmountFailureInTests() // No-op if not running inside "go test"
 				time.Sleep(50 * time.Millisecond)
 				continue
 			default:
